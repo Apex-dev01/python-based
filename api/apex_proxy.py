@@ -1,23 +1,20 @@
-# apex_proxy.py
-# This file is now located in the 'api' directory for Vercel deployment.
+# This file is a more advanced proxy script that attempts to rewrite
+# all URLs on a proxied page to make them function correctly.
 
 from flask import Flask, request, render_template_string, redirect, url_for, Response
 import requests
 import re
 from urllib.parse import urlparse, quote_plus, urljoin
 import chardet
-import io
+from bs4 import BeautifulSoup
 
-# The following libraries need to be installed for Vercel:
-# Flask, requests, and chardet should be listed in requirements.txt
+# The following libraries are required:
+# Flask, requests, chardet, beautifulsoup4, and lxml
 
 app = Flask(__name__)
-# Set a secret key for session management, although not used here, it's a good practice.
 app.secret_key = 'super_secret_key'
 
 # --- HTML Template with Embedded CSS and JS ---
-# This template is a single string to meet the "one file" requirement.
-# It includes the main UI, the settings page, and the logic to handle the form submission.
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -201,12 +198,52 @@ def proxy_request():
         search_url = f'https://www.google.com/search?q={search_query}'
         return redirect(url_for('serve_proxy', url=search_url))
 
+def rewrite_html(content, target_url):
+    """
+    Parses the HTML and rewrites all URLs to be proxied.
+    """
+    soup = BeautifulSoup(content, 'lxml')
+    
+    # Define tags and attributes to rewrite
+    tags_to_rewrite = {
+        'a': 'href',
+        'link': 'href',
+        'script': 'src',
+        'img': 'src',
+        'source': 'src',
+        'iframe': 'src',
+        'form': 'action',
+    }
+    
+    parsed_url = urlparse(target_url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+    for tag, attr in tags_to_rewrite.items():
+        for element in soup.find_all(tag, **{attr: True}):
+            url = element.get(attr)
+            if url and not url.startswith('http'):
+                abs_url = urljoin(base_url, url)
+                element[attr] = url_for('serve_proxy', url=abs_url)
+
+    # Rewrite style URLs within the style tags
+    for style_tag in soup.find_all('style'):
+        style_content = style_tag.string
+        if style_content:
+            style_content = re.sub(
+                r'url\((["\']?)(.*?)\1\)',
+                lambda match: f'url({match.group(1)}{url_for("serve_proxy", url=urljoin(base_url, match.group(2)))}{match.group(1)})',
+                style_content
+            )
+            style_tag.string = style_content
+            
+    return str(soup)
+
 # --- Main proxy serving route ---
 @app.route('/serve_proxy', methods=['GET'])
 def serve_proxy():
     """
-    Fetches the content from the target URL and serves it to the user.
-    This version includes more robust handling for content and headers.
+    Fetches the content from the target URL, rewrites it, and serves it to the user.
+    This is the more robust version.
     """
     target_url = request.args.get('url')
     if not target_url:
@@ -215,73 +252,32 @@ def serve_proxy():
     print(f"Proxying request for: {target_url}")
 
     try:
-        # Make the request to the target URL with a timeout
+        # Make the request to the target URL
         response = requests.get(target_url, timeout=10)
         
-        # Check for headers that prevent framing
-        x_frame_options = response.headers.get('X-Frame-Options', '').lower()
-        csp = response.headers.get('Content-Security-Policy', '').lower()
-
-        if 'deny' in x_frame_options or 'sameorigin' in x_frame_options:
-            return render_template_string("""
-                <div style="text-align: center; color: white; margin-top: 50px;">
-                    <h1 style="color: #ff0000; font-size: 2em;">Error</h1>
-                    <p>This site cannot be loaded. The website's security policy prevents it from being embedded in an iframe.</p>
-                </div>
-            """)
+        # Detect encoding and decode the content
+        encoding = chardet.detect(response.content)['encoding'] or 'utf-8'
+        content = response.content.decode(encoding, errors='ignore')
         
-        # Check for binary content
-        content_type = response.headers.get('Content-Type', '')
-        if 'text' not in content_type and 'json' not in content_type:
-            # Handle non-text/binary content directly
-            flask_response = Response(response.content, status=response.status_code)
-        else:
-            # Detect encoding and decode the content
-            encoding = chardet.detect(response.content)['encoding']
-            if not encoding:
-                encoding = 'utf-8' # Default to utf-8 if detection fails
-            
-            content = response.content.decode(encoding, errors='ignore')
-            
-            # --- Simple URL rewriting (a basic attempt to fix links) ---
-            # Replaces relative URLs with absolute URLs.
-            # This is a basic approach and may not cover all cases, especially with JavaScript.
-            parsed_url = urlparse(target_url)
-            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        # Rewrite the content
+        rewritten_content = rewrite_html(content, target_url)
 
-            # Regex to find relative URLs in href and src attributes
-            # Pattern looks for href/src followed by a relative path
-            # It avoids absolute URLs and data URIs.
-            pattern = re.compile(r'(href|src)=["\'](?!https?://|data:)(.*?)["\']', re.IGNORECASE)
-            
-            def url_replacer(match):
-                attr, url = match.groups()
-                # Use urljoin to create the absolute URL
-                abs_url = urljoin(base_url, url)
-                return f'{attr}="{abs_url}"'
+        # Create a Flask response object with the modified content
+        flask_response = Response(rewritten_content, status=response.status_code)
 
-            content = pattern.sub(url_replacer, content)
-            
-            # Create a Flask response object with the modified content
-            flask_response = Response(content, status=response.status_code)
-
-        # Copy over useful headers, excluding Hop-by-Hop headers
+        # Copy over useful headers, excluding Hop-by-Hop headers and security headers
         excluded_headers = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'x-frame-options', 'content-security-policy']
         for key, value in response.headers.items():
             if key.lower() not in excluded_headers:
                 flask_response.headers[key] = value
 
         # Set a Content-Security-Policy to allow content from the target URL
-        # This is a basic attempt to prevent mixed-content issues in the iframe.
-        flask_response.headers['Content-Security-Policy'] = f"frame-src '{target_url}'; default-src '{target_url}' 'self' 'unsafe-inline' 'unsafe-eval'; style-src-elem 'self' 'unsafe-inline' https://cdn.tailwindcss.com; img-src * data:; script-src 'self' 'unsafe-inline' 'unsafe-eval';"
-        flask_response.headers['Content-Type'] = content_type
+        # We need to relax the CSP to allow the rewritten content to load.
+        flask_response.headers['Content-Security-Policy'] = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data:; connect-src *; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; img-src * data:; script-src 'self' 'unsafe-inline' 'unsafe-eval';"
+        flask_response.headers['Content-Type'] = 'text/html; charset=utf-8'
 
         return flask_response
 
     except requests.exceptions.RequestException as e:
         print(f"Proxy Error: {e}")
         return f"<h1>Proxy Error</h1><p>Could not connect to the requested URL: {target_url}</p><p>Details: {e}</p>", 502
-
-# The following is for local development only and is ignored by Vercel.
-# if __name__ == '__main__':
-#     app.run(host='0.0.0.0', port=5000, debug=True)
