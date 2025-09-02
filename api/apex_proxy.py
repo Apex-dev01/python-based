@@ -252,8 +252,11 @@ def serve_proxy():
     print(f"Proxying request for: {target_url}")
 
     try:
-        # Make the request to the target URL
-        response = requests.get(target_url, timeout=10)
+        # Create a new headers dictionary, excluding 'Accept-Encoding'
+        headers = {key: value for key, value in request.headers.items() if key != 'Accept-Encoding'}
+
+        # Make the request with the modified headers
+        response = requests.get(target_url, headers=headers, timeout=10)
         
         # Detect encoding and decode the content
         encoding = chardet.detect(response.content)['encoding'] or 'utf-8'
