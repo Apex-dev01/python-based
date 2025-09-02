@@ -2,14 +2,14 @@
 "version": 2,
 "builds": [
 {
-"src": "api/apex_proxy.py",
+"src": "api/main.py",
 "use": "@vercel/python"
 }
 ],
 "routes": [
 {
 "src": "/(.*)",
-"dest": "api/apex_proxy.py"
+"dest": "api/main.py"
 }
 ]
 }
