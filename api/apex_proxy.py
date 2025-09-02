@@ -218,6 +218,18 @@ def serve_proxy():
         # Make the request to the target URL with a timeout
         response = requests.get(target_url, timeout=10)
         
+        # Check for headers that prevent framing
+        x_frame_options = response.headers.get('X-Frame-Options', '').lower()
+        csp = response.headers.get('Content-Security-Policy', '').lower()
+
+        if 'deny' in x_frame_options or 'sameorigin' in x_frame_options:
+            return render_template_string("""
+                <div style="text-align: center; color: white; margin-top: 50px;">
+                    <h1 style="color: #ff0000; font-size: 2em;">Error</h1>
+                    <p>This site cannot be loaded. The website's security policy prevents it from being embedded in an iframe.</p>
+                </div>
+            """)
+        
         # Check for binary content
         content_type = response.headers.get('Content-Type', '')
         if 'text' not in content_type and 'json' not in content_type:
@@ -254,7 +266,7 @@ def serve_proxy():
             flask_response = Response(content, status=response.status_code)
 
         # Copy over useful headers, excluding Hop-by-Hop headers
-        excluded_headers = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
+        excluded_headers = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'x-frame-options', 'content-security-policy']
         for key, value in response.headers.items():
             if key.lower() not in excluded_headers:
                 flask_response.headers[key] = value
