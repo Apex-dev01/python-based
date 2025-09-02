@@ -1,3 +1,5 @@
 Flask
 requests
 chardet
+beautifulsoup4
+lxml
