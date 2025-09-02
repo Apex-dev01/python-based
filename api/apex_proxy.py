@@ -4,10 +4,12 @@
 from flask import Flask, request, render_template_string, redirect, url_for, Response
 import requests
 import re
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, urljoin
+import chardet
+import io
 
 # The following libraries need to be installed for Vercel:
-# Flask and requests should be listed in requirements.txt
+# Flask, requests, and chardet should be listed in requirements.txt
 
 app = Flask(__name__)
 # Set a secret key for session management, although not used here, it's a good practice.
@@ -204,9 +206,7 @@ def proxy_request():
 def serve_proxy():
     """
     Fetches the content from the target URL and serves it to the user.
-    Note: This is a very basic proxy. It does not handle complex headers,
-    cookies, or JavaScript that tries to make requests relative to the original
-    domain. This is a common limitation of simple proxies.
+    This version includes more robust handling for content and headers.
     """
     target_url = request.args.get('url')
     if not target_url:
@@ -215,11 +215,43 @@ def serve_proxy():
     print(f"Proxying request for: {target_url}")
 
     try:
-        # Make the request to the target URL
-        response = requests.get(target_url, stream=True, timeout=10)
+        # Make the request to the target URL with a timeout
+        response = requests.get(target_url, timeout=10)
         
-        # Create a Flask response object with the same content and headers
-        flask_response = Response(response.iter_content(chunk_size=1024), status=response.status_code)
+        # Check for binary content
+        content_type = response.headers.get('Content-Type', '')
+        if 'text' not in content_type and 'json' not in content_type:
+            # Handle non-text/binary content directly
+            flask_response = Response(response.content, status=response.status_code)
+        else:
+            # Detect encoding and decode the content
+            encoding = chardet.detect(response.content)['encoding']
+            if not encoding:
+                encoding = 'utf-8' # Default to utf-8 if detection fails
+            
+            content = response.content.decode(encoding, errors='ignore')
+            
+            # --- Simple URL rewriting (a basic attempt to fix links) ---
+            # Replaces relative URLs with absolute URLs.
+            # This is a basic approach and may not cover all cases, especially with JavaScript.
+            parsed_url = urlparse(target_url)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+            # Regex to find relative URLs in href and src attributes
+            # Pattern looks for href/src followed by a relative path
+            # It avoids absolute URLs and data URIs.
+            pattern = re.compile(r'(href|src)=["\'](?!https?://|data:)(.*?)["\']', re.IGNORECASE)
+            
+            def url_replacer(match):
+                attr, url = match.groups()
+                # Use urljoin to create the absolute URL
+                abs_url = urljoin(base_url, url)
+                return f'{attr}="{abs_url}"'
+
+            content = pattern.sub(url_replacer, content)
+            
+            # Create a Flask response object with the modified content
+            flask_response = Response(content, status=response.status_code)
 
         # Copy over useful headers, excluding Hop-by-Hop headers
         excluded_headers = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
@@ -229,8 +261,8 @@ def serve_proxy():
 
         # Set a Content-Security-Policy to allow content from the target URL
         # This is a basic attempt to prevent mixed-content issues in the iframe.
-        # It may need to be more complex for different sites.
         flask_response.headers['Content-Security-Policy'] = f"frame-src '{target_url}'; default-src '{target_url}' 'self' 'unsafe-inline' 'unsafe-eval'; style-src-elem 'self' 'unsafe-inline' https://cdn.tailwindcss.com; img-src * data:; script-src 'self' 'unsafe-inline' 'unsafe-eval';"
+        flask_response.headers['Content-Type'] = content_type
 
         return flask_response
 
